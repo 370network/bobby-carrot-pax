@@ -4,10 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+crate-type = ["staticlib"]
 
 [dependencies]
+nix = "0.23"
+libc = "0.2.162"
 
 [dependencies.sdl2]
 version = "0.35.2"
 default-features = false
-features = ["ttf", "image", "gfx", "mixer", "hidapi"]
+features = ["image", "gfx", "static-link"]

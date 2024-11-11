@@ -2,22 +2,33 @@ use std::env;
 use std::fmt;
 use std::thread::sleep;
 use std::time::Duration;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::io::stdout;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use libc::timeval;
+use std::fs::File;
+use std::os::unix::io::AsRawFd;
+use nix::unistd::read;
 
 use sdl2::{
-    event::Event,
+    //event::Event,
     image::LoadTexture,
-    keyboard::{Keycode, Scancode},
+    //keyboard::{Keycode, Scancode},
     pixels::Color,
     rect::Rect,
     render::{BlendMode, Texture, TextureCreator},
+    surface::Surface,
+    pixels::PixelFormatEnum,
+    gfx::rotozoom::RotozoomSurface,
 };
 
 const FRAMES: u64 = 60;
 const FRAMES_PER_STEP: u32 = 2;
 const WIDTH_POINTS: u32 = 16;
 const HEIGHT_POINTS: u32 = 16;
-const VIEW_WIDTH_POINTS: u32 = 10;
-const VIEW_HEIGHT_POINTS: u32 = 12;
+const VIEW_WIDTH_POINTS: u32 = 7;
+const VIEW_HEIGHT_POINTS: u32 = 10;
 
 const MS_PER_FRAME: u64 = 1000 / FRAMES;
 const WIDTH: u32 = 32 * WIDTH_POINTS;
@@ -27,117 +38,128 @@ const VIEW_HEIGHT: u32 = 32 * VIEW_HEIGHT_POINTS;
 const WIDTH_POINTS_DELTA: u32 = WIDTH_POINTS - VIEW_WIDTH_POINTS;
 const HEIGHT_POINTS_DELTA: u32 = HEIGHT_POINTS - VIEW_HEIGHT_POINTS;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+#[repr(C)]
+struct InputEvent {
+    time: libc::timeval,
+    type_: u16,
+    code: u16,
+    value: i32,
+}
+
+
+#[no_mangle]
+pub extern "C" fn rust_load() {
+    let _ = main2();
+}
+
+fn main2() -> Result<(), Box<dyn std::error::Error>> {
+
     let mut map = Map::Normal(1);
-    let args = env::args().collect::<Vec<_>>();
-    if args.len() > 1 {
-        let arg = &args[1];
-        let (type_str, num_str) = arg
-            .split_once('-')
-            .ok_or_else(|| format!("Invalid map: {arg}"))?;
-        let num: u32 = num_str.parse()?;
-        match type_str {
-            "normal" => map = Map::Normal(num),
-            "egg" => map = Map::Egg(num),
-            _ => return Err(format!("Invalid map: {arg}").into()),
-        }
-    }
     let mut map_info_fresh = map.load_map_info()?;
     let mut map_info = map_info_fresh.clone();
 
     let context = sdl2::init()?;
-    let video_subsystem = context.video()?;
     let timer = context.timer()?;
 
-    #[cfg(target_os = "linux")]
-    let scale = 2.0;
-    #[cfg(not(target_os = "linux"))]
+    let path = "/dev/keypad"; // Replace X with the correct number
+       let mut file = File::open(path)?;
+
+       // Set the file descriptor to non-blocking mode
+       let fd = file.as_raw_fd();
+       fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))?;
+
+       let mut event = InputEvent {
+           time: libc::timeval { tv_sec: 0, tv_usec: 0 },
+           type_: 0,
+           code: 0,
+           value: 0,
+       };
+
     let scale = 1.0;
 
     let mut show_help = false;
     let mut full_view = false;
-    let window = video_subsystem
+    /*let window = video_subsystem
         .window(
             format!("Bobby Carrot ({})", map).as_str(),
-            (VIEW_WIDTH as f32 * scale) as u32,
-            (VIEW_HEIGHT as f32 * scale) as u32,
+            240,
+            320,
         )
-        .build()?;
-    let mut canvas = window.into_canvas().present_vsync().build()?;
-    canvas.set_scale(scale, scale)?;
+        .build()?;*/
+
+    //surface namiesto okna
+    let surface = Surface::new(240+320, 320, PixelFormatEnum::RGB24).unwrap();
+    let mut canvas = surface.into_canvas()?;
+
+    let mut rotatedfinal = Surface::new(320, 240, PixelFormatEnum::RGB565).unwrap();
+    let blitsrc = Rect::new(0,0,320,240);
+    let blitdest = Rect::new(0,8,0,0);
+
+    //canvas.set_scale(scale, scale)?;
     canvas.set_blend_mode(BlendMode::Blend);
     let texture_creator = canvas.texture_creator();
-    let mut event_pump = context.event_pump()?;
+    //let mut event_pump = context.event_pump()?;
 
     let mut frame: u32 = 0;
     let assets = Assets::load_all(&texture_creator)?;
     let mut bobby = Bobby::new(frame, timer.ticks(), map_info.coord_start);
 
+    let mut whichkeydown = 0;
+
     'running: loop {
         let now_ms = timer.ticks();
-        for event in event_pump.poll_iter() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Q),
-                    ..
-                } => break 'running,
-                Event::KeyDown {
-                    keycode: Some(code),
-                    ..
-                } => {
-                    if code != Keycode::H && code != Keycode::F1 {
-                        show_help = false;
-                    }
-                    match code {
-                        Keycode::R => {
-                            map_info = map_info_fresh.clone();
-                            bobby = Bobby::new(frame, now_ms, map_info.coord_start);
-                        }
-                        Keycode::N => {
+
+        let size = std::mem::size_of::<InputEvent>();
+        let buffer = unsafe {
+            std::slice::from_raw_parts_mut(&mut event as *mut _ as *mut u8, size)
+        };
+
+        match read(fd, buffer) {
+               Ok(_) => {
+                   if event.type_ == 1 {
+                       if event.value == 1 {
+                           if event.code == 69 {
                             map = map.next();
-                            canvas
-                                .window_mut()
-                                .set_title(format!("Bobby Carrot ({})", map).as_str())?;
                             map_info_fresh = map.load_map_info()?;
                             map_info = map_info_fresh.clone();
                             bobby = Bobby::new(frame, now_ms, map_info.coord_start);
-                        }
-                        Keycode::P => {
+                        } else if event.code == 102 {
                             map = map.previous();
-                            canvas
-                                .window_mut()
-                                .set_title(format!("Bobby Carrot ({})", map).as_str())?;
                             map_info_fresh = map.load_map_info()?;
                             map_info = map_info_fresh.clone();
                             bobby = Bobby::new(frame, now_ms, map_info.coord_start);
+                        } else if event.code == 223 {
+                            break 'running;
+                        } else if event.code == 3 {
+                           whichkeydown = 2;
+                        } else if event.code == 5 {
+                            whichkeydown = 4;
+                        } else if event.code == 7 {
+                            whichkeydown = 6;
+                        } else if event.code == 9 {
+                            whichkeydown = 8;
                         }
-                        Keycode::F => {
-                            full_view = !full_view;
-                            if full_view {
-                                canvas.window_mut().set_size(WIDTH, HEIGHT)?;
-                            } else {
-                                canvas.window_mut().set_size(VIEW_WIDTH, VIEW_HEIGHT)?;
-                            }
-                        }
-                        Keycode::H | Keycode::F1 => {
-                            show_help = !show_help;
-                        }
-                        _ => {}
+                    } else if event.value == 0 {
+                        whichkeydown = 0;
                     }
-                }
-                _ => {}
-            }
-        }
-        let keyboard = event_pump.keyboard_state();
-        let is_pressed = |code| keyboard.is_scancode_pressed(code);
-        let state_opt = if is_pressed(Scancode::Left) || is_pressed(Scancode::A) {
+                   }
+               }
+               Err(err) => {
+                //h
+               }
+           }
+
+
+        /*let keyboard = event_pump.keyboard_state();
+        let is_pressed = |code| keyboard.is_scancode_pressed(code);*/
+        let state_opt = if whichkeydown == 4 {
             Some(State::Left)
-        } else if is_pressed(Scancode::Right) || is_pressed(Scancode::D) {
+        } else if whichkeydown == 6 {
             Some(State::Right)
-        } else if is_pressed(Scancode::Up) || is_pressed(Scancode::W) {
+        } else if whichkeydown == 2 {
             Some(State::Up)
-        } else if is_pressed(Scancode::Down) || is_pressed(Scancode::S) {
+        } else if whichkeydown == 8 {
             Some(State::Down)
         } else {
             None
@@ -161,9 +183,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             if bobby.faded_out {
                 map = map.next();
-                canvas
+                /*canvas
                     .window_mut()
-                    .set_title(format!("Bobby Carrot ({})", map).as_str())?;
+                    .set_title(format!("Bobby Carrot ({})", map).as_str())?;*/
                 map_info_fresh = map.load_map_info()?;
                 map_info = map_info_fresh.clone();
                 bobby = Bobby::new(frame, now_ms, map_info.coord_start);
@@ -429,8 +451,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         canvas.present();
 
+        //NOVY RENDEROVACI KOD
+        let convertedsurface = canvas.surface().convert_format(PixelFormatEnum::RGB565)?;
+        let rotatedsurface = convertedsurface.rotate_90deg(1)?;
+
+
+        let _ = rotatedsurface.blit(blitsrc, &mut rotatedfinal, blitdest);
+
+
+        let rawpixels = rotatedfinal.without_lock().expect("h");
+
+        let mut fb = OpenOptions::new()
+        .write(true)
+        .open("/dev/fb")
+        ?;
+
+        let _ = fb.write_all(rawpixels);
+
+        let _ = fb.flush();
+
         frame += 1;
-        sleep(Duration::from_millis(MS_PER_FRAME));
+        sleep(Duration::from_millis(1));
     }
 
     Ok(())
